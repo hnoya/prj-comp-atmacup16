@@ -26,3 +26,5 @@ streamlit
 faiss-cpu
 fugashi
 unidic_lite
+
+surprise
