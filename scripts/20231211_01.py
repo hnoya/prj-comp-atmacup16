@@ -60,119 +60,6 @@ def get_top_K(arr: np.ndarray, k: int):
     return ind[np.argsort(arr[ind])][::-1]
 
 # %%
-yado = pd.read_csv(CSVPath.yado)
-
-for col in yado.columns.tolist():
-    if col != "total_room_cnt":
-        yado[col] = yado[col].fillna(0)
-
-yado.head(3)
-
-# %%
-train = pd.read_csv(CSVPath.log_train)
-label = pd.read_csv(CSVPath.label_train)
-
-def fix_seq(x):
-    if x.session_id != x._session_id:
-        return 9
-    else:
-        return 9 - x._seq_no
-n_seqs_series = train.groupby("session_id").agg("max")["seq_no"]
-train = train.merge(
-    pd.DataFrame({
-        "session_id": n_seqs_series.index,
-        "max_session": n_seqs_series.tolist(),
-    })
-)
-
-train["seq_no_fixed"] = 9 - train["max_session"] + train["seq_no"]
-label["seq_no_fixed"] = 10
-# train = pd.concat([train, label], axis=0).reset_index(drop=True)
-
-# %%
-test = pd.read_csv(CSVPath.log_test)
-
-n_seqs_series = test.groupby("session_id").agg("max")["seq_no"]
-test = test.merge(
-    pd.DataFrame({
-        "session_id": n_seqs_series.index,
-        "max_session": n_seqs_series.tolist(),
-    })
-)
-
-test["seq_no_fixed"] = 9 - test["max_session"] + test["seq_no"]
-
-test.head(3)
-
-# %%
-df = pd.concat([
-        train[["session_id", "yad_no", "seq_no_fixed"]],
-        test[["session_id", "yad_no", "seq_no_fixed"]]]
-).reset_index(drop=True)
-df["seq_no_fixed"] += 1
-df = df.rename(
-        columns={"session_id": "user", "yad_no": "item", "seq_no_fixed": "rating"}
-)
-
-# %%
-reader = surprise.Reader(rating_scale=(1, 10))
-df["rating"] = 1
-data = surprise.Dataset.load_from_df(
-    df, reader
-).build_full_trainset()
-item_id_to_yad_id = {
-    data.to_inner_iid(yad_id):yad_id for yad_id in (train["yad_no"].tolist() + test["yad_no"].tolist())
-}
-
-model = surprise.SVD(random_state=SEED, n_factors=1000)
-model.fit(data)
-
-# %%
-import torch
-
-# %%
-sample_n = 10_000
-"""
-ratings = np.dot(
-    model.pu.astype(np.float16)[:sample_n, :],
-    model.qi.transpose(1, 0).astype(np.float16)
-)
-ratings += model.bu.reshape(-1, 1).astype(np.float16)[:sample_n, :]
-ratings += model.bi.reshape(1, -1).astype(np.float16)
-"""
-ratings = torch.mm(
-    torch.tensor(model.pu[:sample_n, :], dtype=torch.float16).cuda(),
-    torch.tensor(model.qi.transpose(1, 0), dtype=torch.float16).cuda(),
-).cpu().numpy()
-ratings += model.bu.reshape(-1, 1).astype(np.float16)[:sample_n, :]
-ratings += model.bi.reshape(1, -1).astype(np.float16)
-
-# %%
-get_top_K(ratings[0], 11)
-
-# %%
-oof_preds = []
-for i, last_idx in zip(range(sample_n), train.groupby("session_id").tail(1)["yad_no"][:sample_n]):
-    oof_preds.append(
-        [item_id_to_yad_id[item_id] for item_id in get_top_K(ratings[i, :], 11) if item_id_to_yad_id[item_id] != last_idx]
-    )
-
-
-# %%
-mapk(
-    [[idx] for idx in label["yad_no"].tolist()][:sample_n],
-    oof_preds[:sample_n],
-)
-
-# %% [markdown]
-# - SVD(random_state=SEED, n_factors=1000): 0.00015555555555555554
-# - NMF(random_state=SEED, n_factors=240): 0.33048575396825397
-# 
-
-# %%
-raise NotImplementedError()
-
-# %%
 def get_embs(train: pd.DataFrame, test: pd.DataFrame, col: str) -> tuple[np.ndarray, np.ndarray]:
     #["wid_cd", "ken_cd", "lrg_cd", "sml_cd"]
     df = pd.concat([
@@ -288,15 +175,18 @@ def train_catboost(
     eval_data = catboost.Pool(X_valid, label=y_valid, cat_features=categorical_features)
     # see: https://catboost.ai/en/docs/concepts/loss-functions-ranking#usage-information
     ctb_params = {
-        "objective": "MultiClass",
-        "loss_function": "CrossEntropy",
-        "num_boost_round": 10000,
+        "objective": "CrossEntropy", # "MultiClass",
+        "loss_function": "CrossEntropy", # "CrossEntropy",
+        'eval_metric' : 'AUC',
+        "num_boost_round": 10_000,
         "early_stopping_rounds": 1000,
         "learning_rate": 0.1,
-        "verbose": 1000,
+        "verbose": 1_000,
         "random_seed": seed,
         # "task_type": "GPU",
+        # "used_ram_limit": "32gb",
     }
+
     model = catboost.CatBoost(ctb_params)
     model.fit(train_data, eval_set=[eval_data], use_best_model=True, plot=False)
     pickle.dump(
@@ -333,8 +223,8 @@ def train_lightgbm(
         X_valid, label=y_valid, categorical_feature=categorical_features
     )
     lgb_params = {
-        "objective": "multiclass",
-        "num_class": 13807, # int(max([max(y_train), max(y_valid)])),
+        "objective": "binary",
+        # "num_class": 13807, # int(max([max(y_train), max(y_valid)])),
         "learning_rate": 0.01,
         # "metric": "map",
         "seed": seed,
@@ -367,7 +257,7 @@ def eval_lightgbm(
 
 
 # %%
-NOT_USE_COL = ["session_id", "yad_no", "fold"]
+NOT_USE_COL = ["session_id", "label", "fold"]
 
 def train_folds(
     train: pd.DataFrame,
@@ -381,16 +271,16 @@ def train_folds(
             train.loc[train["fold"] != fold],
             train.loc[train["fold"] == fold],
         )
-        valid_df = valid_df.loc[valid_df["yad_no"].isin(list(set(train_df["yad_no"])))]
+        valid_df = valid_df.loc[valid_df["label"].isin(list(set(train_df["label"])))]
         use_columns = [
             col for col in train_df.columns.tolist() if col not in NOT_USE_COL
         ]
         X_train = train_df[use_columns]
-        y_train = train_df["yad_no"]
+        y_train = train_df["label"]
         X_valid = valid_df[use_columns]
-        y_valid = valid_df["yad_no"]
+        y_valid = valid_df["label"]
 
-        categorical_features = []
+        categorical_features = ["yad_no"]
         if model_type == "lgb":
             train_lightgbm(
                 (X_train, y_train),
@@ -424,7 +314,7 @@ def eval_folds(
     model_path: str = "../models",
 ) -> np.ndarray:
     train["pred"] = 0
-    categorical_features = []
+    categorical_features = ["yad_no"]
     for fold in range(n_fold):
         _, valid_df = train.loc[train["fold"] != fold], train.loc[train["fold"] == fold]
         use_columns = [
@@ -445,53 +335,37 @@ def eval_folds(
     return train["pred"].values
 
 # %%
-import gc
+df_train.head(3)
 
-del train, test, label, fold
-gc.collect()
+# %% [markdown]
+# - classに閲覧したcategoryを入れ、ラベルなら1、そうでないなら0
+#    - ただしそのままだと0の場合の情報が左側に入ってしまっている
+#    - seq_noごとに逐次作成する必要がありそう？
+#       - testも同じ条件なので気にせず良い？
 
 # %%
-df_train.head(3)
+train = pd.read_csv(CSVPath.log_train)
+test = pd.read_csv(CSVPath.log_test)
+label = pd.read_csv(CSVPath.label_train)
+
+# %%
+neg_sample = train[["session_id", "yad_no"]]
+pos_sample = label[["session_id", "yad_no"]]
+neg_sample["label"] = 0
+pos_sample["label"] = 1
+label_sample = pd.concat([neg_sample, pos_sample], axis=0).reset_index(drop=True)
+df_train = df_train.drop(["yad_no"], axis=1)
+df_train = df_train.merge(label_sample, on=["session_id"], how="left")
+df_train.head(10)
+
+# %%
+df_train["label"].mean()
 
 # %%
 # got oom
 train_folds(df_train, 5, SEED, "ctb", "../models/20231211_01_model")
 
 # train_folds(df_train, 5, SEED, "lgb", "../models/20231211_01_model")
-
-# %%
-
-
-# %%
-
-
-# %%
-raise NotImplementedError()
-
-# %%
-sample_n = test["session_id"].nunique()
-targets = np.dot(
-    model.pu.astype(np.float16)[-sample_n:, :],
-    model.qi.transpose(1, 0).astype(np.float16)
-)
-targets += model.bu.reshape(-1, 1).astype(np.float16)[-sample_n:, :]
-targets += model.bi.reshape(1, -1).astype(np.float16)
-
-# %%
-sub = pd.read_csv(CSVPath.submission)
-
-preds = []
-for i, yad_id in zip(range(len(targets)), test.groupby("session_id").tail(1)["yad_no"].tolist()):
-    preds.append(
-        [item_id_to_yad_id[item_id] for item_id in get_top_K(targets[i, :], 11) if item_id_to_yad_id[item_id] != yad_id][:10]
-    )
-
-
-for i in range(10):
-    sub[f"predict_{i}"] = np.array(preds)[:, i]
-
-# %%
-sub.to_csv("../sumission_20231210_03.csv", index=False)
 
 # %%
 
