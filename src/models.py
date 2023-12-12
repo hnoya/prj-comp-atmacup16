@@ -24,10 +24,10 @@ def train_catboost(
     eval_data = catboost.Pool(X_valid, label=y_valid, cat_features=categorical_features)
     # see: https://catboost.ai/en/docs/concepts/loss-functions-ranking#usage-information
     ctb_params = {
-        "objective": "CrossEntropy", # "MultiClass",
-        "loss_function": "CrossEntropy", # "CrossEntropy",
-        'eval_metric' : 'AUC',
-        "num_boost_round": 1_000,
+        "objective": "CrossEntropy",  # "MultiClass",
+        "loss_function": "CrossEntropy",  # "CrossEntropy",
+        "eval_metric": "AUC",
+        "num_boost_round": 100,
         "early_stopping_rounds": 1000,
         "learning_rate": 0.1,
         "verbose": 1_000,
@@ -54,6 +54,24 @@ def eval_catboost(
     )
     y_pred = model.predict(catboost.Pool(X_valid, cat_features=categorical_features))
     return y_pred
+
+
+def predict_catboost(
+    X_test: pd.DataFrame,
+    folds: list[int],
+    categorical_features: list[str],
+    model_path: str = "../models",
+):
+    y_pred = np.zeros((X_test.shape[0]), dtype="float32")
+    for fold in folds:
+        model = pickle.load(
+            open(os.path.join(model_path, "ctb_fold{}.ctbmodel".format(fold)), "rb")
+        )
+        y_pred += model.predict(
+            catboost.Pool(X_test, cat_features=categorical_features)
+        ) / len(folds)
+    return y_pred
+
 
 def train_lightgbm(
     train_set: tuple[pd.DataFrame, pd.DataFrame],
@@ -103,6 +121,7 @@ def eval_lightgbm(
     )
     y_pred = model.predict(X_valid, num_iteration=model.best_iteration)
     return y_pred
+
 
 def eval_folds(
     train: pd.DataFrame,
