@@ -92,6 +92,7 @@ def train_lightgbm(
     lgb_params = {
         "objective": "binary",
         # "num_class": 13807, # int(max([max(y_train), max(y_valid)])),
+        "metric": "auc",
         "learning_rate": 0.01,
         # "metric": "map",
         "seed": seed,
@@ -170,7 +171,6 @@ def train_folds(
             train.loc[train["fold"] != fold],
             train.loc[train["fold"] == fold],
         )
-        # valid_df = valid_df.loc[valid_df[label_col].isin(list(set(train_df[label_col])))]
         use_columns = [
             col for col in train_df.columns.tolist() if col not in not_use_cols
         ]
