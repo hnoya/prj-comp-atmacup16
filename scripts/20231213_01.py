@@ -13,7 +13,7 @@ sys.path.append("../")
 from src.utils import seed_everything, get_top_K
 from src.validate import validate
 from src.memory import reduce_mem_usage
-from src.models import train_folds, eval_folds, predict_catboost
+from src.models import train_folds, eval_folds, predict_catboost, train_folds_v2
 from src.metrics import mapk
 from src.features import get_base_ranking_df
 
@@ -22,7 +22,7 @@ from src.features import get_base_ranking_df
 class Config:
     data_path: str = "../data/"
     seed: int = 0
-    experiment_name: str = "20231212_02"
+    experiment_name: str = "20231213_01"
     fold: int = 5
     fold_csv: str = "../data/train_stkgf_5folds_seed0.csv"
 
@@ -42,6 +42,95 @@ seed_everything(Config.seed)
 
 # %%
 N_SELECT: int = 20
+
+# %%
+train = pd.read_csv(CSVPath.log_train)
+test = pd.read_csv(CSVPath.log_test)
+label = pd.read_csv(CSVPath.label_train)
+
+# %%
+import torch
+import pickle
+import gc
+
+train = pd.read_csv(CSVPath.log_train)
+test = pd.read_csv(CSVPath.log_test)
+
+n_seqs_series = train.groupby("session_id").agg("max")["seq_no"]
+train = train.merge(
+    pd.DataFrame({
+        "session_id": n_seqs_series.index,
+        "max_session": n_seqs_series.tolist(),
+    })
+)
+
+n_seqs_series = test.groupby("session_id").agg("max")["seq_no"]
+test = test.merge(
+    pd.DataFrame({
+        "session_id": n_seqs_series.index,
+        "max_session": n_seqs_series.tolist(),
+    })
+)
+
+fold = pd.read_csv(Config.fold_csv)
+for fold_idx in range(Config.fold):
+    train_train = train.merge(fold, on=["session_id", "yad_no"], how="left")
+    train_train = train_train.loc[train_train["fold"] != fold_idx]
+
+    df = pd.concat([
+            train_train[["session_id", "yad_no"]],
+            test[["session_id", "yad_no"]]]
+    ).reset_index(drop=True)
+    df["seq_no_fixed"] = 1
+    df = df.rename(
+            columns={"session_id": "user", "yad_no": "item", "seq_no_fixed": "rating"}
+    )
+
+    reader = surprise.Reader(rating_scale=(0, 1))
+    data = surprise.Dataset.load_from_df(
+        df, reader
+    ).build_full_trainset()
+    item_id_to_yad_id = {
+        data.to_inner_iid(yad_id):yad_id for yad_id in (train_train["yad_no"].tolist() + test["yad_no"].tolist())
+    }
+
+    model = surprise.NMF(random_state=Config.seed, n_factors=240)
+    model.fit(data)
+
+    ratings = torch.mm(
+        torch.tensor(model.pu, dtype=torch.float16).cuda(),
+        torch.tensor(model.qi.transpose(1, 0), dtype=torch.float16).cuda(),
+    ).cpu().numpy()
+    ratings += model.bu.reshape(-1, 1).astype(np.float16)
+    ratings += model.bi.reshape(1, -1).astype(np.float16)
+
+    np.save(f"../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}.npy", ratings)
+    with open(f"../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}_item_id_to_yad_id.pkl", mode="wb") as f:
+        pickle.dump(f, item_id_to_yad_id)
+
+    del model, ratings
+    gc.collect()
+
+# %%
+raise NotImplementedError()
+
+# %%
+import torch
+
+"""
+ratings = torch.mm(
+    torch.tensor(model.pu, dtype=torch.float16).cuda(),
+    torch.tensor(model.qi.transpose(1, 0), dtype=torch.float16).cuda(),
+).cpu().numpy()
+ratings += model.bu.reshape(-1, 1).astype(np.float16)
+ratings += model.bi.reshape(1, -1).astype(np.float16)
+"""
+
+# %%
+#np.save("../features/NMF_nfactors480_float32_v20231213_01.npy", ratings)
+
+# %%
+
 
 # %%
 train = pd.read_csv(CSVPath.log_train)
@@ -89,60 +178,56 @@ df_train.head(3)
 
 # %%
 import itertools
+import pickle
+
 
 def get_flatten(l: list):
     return list(itertools.chain.from_iterable(l))
 
+for fold_idx in range(Config.fold):
+    ratings = np.load("../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}.npy")
+    with open("../features/NMF_nfactors480_float16_v20231213_01_fold{fold_idx}_item_id_to_yad_id.pkl", mode="rb") as f:
+        item_id_to_yad_id = pickle.load(f)
 
+    top_idxs = []
+    for rating in ratings:
+        top_idx = get_top_K(rating, N_SELECT)
+        top_idxs.append([item_id_to_yad_id[idx] for idx in top_idx.tolist()[::-1]])
 
-ratings = np.load("../features/NMF_nfactors480_float16_v20231211_01.npy")
+    top_idxs = top_idxs[:train["session_id"].nunique()]
 
-import pickle
+    nmf_select = pd.DataFrame({
+        "session_id": get_flatten(
+            [[idx] * N_SELECT for idx in train["session_id"].unique().tolist()]
+        ),
+        "yad_no": get_flatten(top_idxs)
+    })
+    nmf_select["label"] = 0
 
-with open("../features/NMF_nfactors480_float16_v20231211_01_idxs.pkl", mode="rb") as f:
-    item_id_to_yad_id = pickle.load(f)
+    pos_sample = label.loc[
+        label["session_id"].isin(train.loc[train["fold"] != fold_idx, "session_id"].tolist()),
+        ["session_id", "yad_no"]
+    ]
+    pos_sample["label"] = 1
 
-top_idxs = []
-for rating in ratings:
-    top_idx = get_top_K(rating, N_SELECT)
-    top_idxs.append([item_id_to_yad_id[idx] for idx in top_idx.tolist()[::-1]])
+    label_sample = pd.concat([nmf_select, pos_sample], axis=0).drop_duplicates(
+                        subset=["session_id", "yad_no"], keep="last"
+                    ).reset_index(drop=True)
+    label_sample.head(5)
 
-nmf_select = pd.DataFrame({
-    "session_id": get_flatten(
-        [[idx] * N_SELECT for idx in train["session_id"].unique().tolist()]
-        + [[idx] * N_SELECT for idx in test["session_id"].unique().tolist()]
-    ),
-    "yad_no": get_flatten(top_idxs)
-})
-nmf_select["label"] = 0
+    _df_train = df_train.drop(["yad_no"], axis=1)
+    _df_train = _df_train.merge(label_sample, on=["session_id"], how="left")
+    _df_train = _df_train.groupby(["session_id"]).tail(20).reset_index(drop=True)
 
-pos_sample = label[["session_id", "yad_no"]]
-pos_sample["label"] = 1
-
-label_sample = pd.concat([nmf_select, pos_sample], axis=0).drop_duplicates(
-                    subset=["session_id", "yad_no"], keep="last"
-                ).reset_index(drop=True)
-label_sample.head(5)
-
-# %%
-df_train = df_train.drop(["yad_no"], axis=1)
-df_train = df_train.merge(label_sample, on=["session_id"], how="left")
-df_train.head(10)
-
-# %%
-df_train = df_train.groupby(["session_id"]).tail(20).reset_index(drop=True)
-
-# %%
-# got oom
-train_folds(
-    df_train, Config.fold, Config.seed,
-    "ctb", "label",
-    # ["session_id", "label", "fold"], ["yad_no"] + [f"seen_{i}" for i in range(10)],
-    ["session_id", "label", "fold"], ["yad_no"] + [f"seen_{i}" for i in range(10)],
-    f"../models/{Config.experiment_name}_model",
-)
-
-# train_folds(df_train, 5, SEED, "lgb", "../models/20231211_01_model")
+    train_folds_v2(
+        df_train,
+        [fold_idx],
+        Config.seed,
+        "ctb", "label",
+        # ["session_id", "label", "fold"], ["yad_no"] + [f"seen_{i}" for i in range(10)],
+        ["session_id", "label", "fold"], ["yad_no"] + [f"seen_{i}" for i in range(10)],
+        f"../models/{Config.experiment_name}_model",
+    )
 
 # %% [markdown]
 # - yad_no cause leak.
@@ -257,9 +342,6 @@ for i in range(10):
 
 # %%
 sub.to_csv(f"../sumission_{Config.experiment_name}.csv", index=False)
-
-# %% [markdown]
-# - List[yad_id]のみを入力として予測する
 
 # %%
 

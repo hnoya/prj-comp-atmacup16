@@ -203,3 +203,52 @@ def train_folds(
             train_rec(train_df, _model_type, fold, seed, output_path)
         else:
             raise NotImplementedError(model_type)
+
+
+def train_folds_v2(
+    train: pd.DataFrame,
+    folds: list[int],
+    seed: int,
+    model_type: str,
+    label_col: str,
+    not_use_cols: list[str],
+    cat_cols: list[str],
+    output_path: str = "../models",
+) -> None:
+    for fold in folds:
+        train_df, valid_df = (
+            train.loc[train["fold"] != fold],
+            train.loc[train["fold"] == fold],
+        )
+        use_columns = [
+            col for col in train_df.columns.tolist() if col not in not_use_cols
+        ]
+        X_train = train_df[use_columns]
+        y_train = train_df[label_col]
+        X_valid = valid_df[use_columns]
+        y_valid = valid_df[label_col]
+
+        categorical_features = cat_cols
+        if model_type == "lgb":
+            train_lightgbm(
+                (X_train, y_train),
+                (X_valid, y_valid),
+                categorical_features,
+                fold,
+                seed,
+                output_path,
+            )
+        elif model_type == "ctb":
+            train_catboost(
+                (X_train, y_train),
+                (X_valid, y_valid),
+                categorical_features,
+                fold,
+                seed,
+                output_path,
+            )
+        elif model_type[:4] == "rec_":
+            _model_type = model_type.split("rec_")[1]
+            train_rec(train_df, _model_type, fold, seed, output_path)
+        else:
+            raise NotImplementedError(model_type)
