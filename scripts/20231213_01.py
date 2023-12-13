@@ -13,7 +13,7 @@ sys.path.append("../")
 from src.utils import seed_everything, get_top_K
 from src.validate import validate
 from src.memory import reduce_mem_usage
-from src.models import train_folds, eval_folds, predict_catboost, train_folds_v2
+from src.models import train_folds, eval_folds, predict_catboost, train_folds_v2, eval_folds_v2
 from src.metrics import mapk
 from src.features import get_base_ranking_df
 
@@ -105,8 +105,10 @@ for fold_idx in range(Config.fold):
     ratings += model.bi.reshape(1, -1).astype(np.float16)
 
     np.save(f"../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}.npy", ratings)
-    with open(f"../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}_item_id_to_yad_id.pkl", mode="wb") as f:
-        pickle.dump(f, item_id_to_yad_id)
+    pickle.dump(
+        item_id_to_yad_id, open(f"../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}_item_id_to_yad_id.pkl", "wb")
+    )
+
 
     del model, ratings
     gc.collect()
@@ -185,8 +187,8 @@ def get_flatten(l: list):
     return list(itertools.chain.from_iterable(l))
 
 for fold_idx in range(Config.fold):
-    ratings = np.load("../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}.npy")
-    with open("../features/NMF_nfactors480_float16_v20231213_01_fold{fold_idx}_item_id_to_yad_id.pkl", mode="rb") as f:
+    ratings = np.load(f"../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}.npy")
+    with open(f"../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}_item_id_to_yad_id.pkl", mode="rb") as f:
         item_id_to_yad_id = pickle.load(f)
 
     top_idxs = []
@@ -204,8 +206,7 @@ for fold_idx in range(Config.fold):
     })
     nmf_select["label"] = 0
 
-    pos_sample = label.loc[
-        label["session_id"].isin(train.loc[train["fold"] != fold_idx, "session_id"].tolist()),
+    pos_sample = label[
         ["session_id", "yad_no"]
     ]
     pos_sample["label"] = 1
@@ -220,7 +221,7 @@ for fold_idx in range(Config.fold):
     _df_train = _df_train.groupby(["session_id"]).tail(20).reset_index(drop=True)
 
     train_folds_v2(
-        df_train,
+        _df_train,
         [fold_idx],
         Config.seed,
         "ctb", "label",
@@ -233,16 +234,69 @@ for fold_idx in range(Config.fold):
 # - yad_no cause leak.
 
 # %%
+x_pred_ctb = None
+for fold_idx in range(Config.fold):
+    ratings = np.load(f"../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}.npy")
+    with open(f"../features/NMF_nfactors480_float32_v20231213_01_fold{fold_idx}_item_id_to_yad_id.pkl", mode="rb") as f:
+        item_id_to_yad_id = pickle.load(f)
+
+    top_idxs = []
+    for rating in ratings:
+        top_idx = get_top_K(rating, N_SELECT)
+        top_idxs.append([item_id_to_yad_id[idx] for idx in top_idx.tolist()[::-1]])
+
+    top_idxs = top_idxs[:train["session_id"].nunique()]
+
+    nmf_select = pd.DataFrame({
+        "session_id": get_flatten(
+            [[idx] * N_SELECT for idx in train["session_id"].unique().tolist()]
+        ),
+        "yad_no": get_flatten(top_idxs)
+    })
+    nmf_select["label"] = 0
+
+    pos_sample = label[
+        ["session_id", "yad_no"]
+    ]
+    pos_sample["label"] = 1
+
+    label_sample = pd.concat([nmf_select, pos_sample], axis=0).drop_duplicates(
+                        subset=["session_id", "yad_no"], keep="last"
+                    ).reset_index(drop=True)
+    label_sample.head(5)
+
+    _df_train = df_train.drop(["yad_no"], axis=1)
+    _df_train = _df_train.merge(label_sample, on=["session_id"], how="left")
+    _df_train = _df_train.groupby(["session_id"]).tail(20).reset_index(drop=True)
+
+    _x_pred_ctb = eval_folds_v2(
+        _df_train,
+        [fold_idx],
+        Config.seed,
+        "ctb", "label",
+        # ["session_id", "label", "fold"], ["yad_no"] + [f"seen_{i}" for i in range(10)],
+        ["session_id", "label", "fold"], ["yad_no"] + [f"seen_{i}" for i in range(10)],
+        f"../models/{Config.experiment_name}_model",
+    )
+    if x_pred_ctb is None:
+        x_pred_ctb = _x_pred_ctb
+    else:
+        x_pred_ctb += _x_pred_ctb
+
+# %%
+"""
 x_pred_ctb = eval_folds(
     df_train, Config.fold, Config.seed,
     "ctb", "label",
     ["session_id", "label", "fold"], ["yad_no"] + [f"seen_{i}" for i in range(10)],
     f"../models/{Config.experiment_name}_model"
 )
+"""
 
+# %%
 oof_preds = []
 for yad_idxs, scores in zip(
-    df_train["yad_no"].to_numpy().reshape(-1, 20), x_pred_ctb.reshape(-1, 20)
+    _df_train["yad_no"].to_numpy().reshape(-1, 20), x_pred_ctb.reshape(-1, 20)
 ):
     yad_rankings = get_top_K(scores, 10)
     oof_preds.append(yad_idxs[yad_rankings].tolist())
@@ -253,6 +307,10 @@ mapk(
     [[idx] for idx in label["yad_no"].tolist()][:sample_n],
     oof_preds[:sample_n],
 )
+
+# %% [markdown]
+# - fixed train leak, did not fix eval leak: 0.5665062447307218
+# - fixed both leak: 0.6884117631793405
 
 # %%
 import pickle

@@ -156,6 +156,38 @@ def eval_folds(
     return train["pred"].values
 
 
+def eval_folds_v2(
+    train: pd.DataFrame,
+    folds: list[int],
+    seed: int,
+    model_type: str,
+    label_col: str,
+    not_use_cols: list[str],
+    cat_cols: list[str],
+    model_path: str = "../models",
+) -> np.ndarray:
+    train["pred"] = 0
+    categorical_features = cat_cols
+    for fold in folds:
+        _, valid_df = train.loc[train["fold"] != fold], train.loc[train["fold"] == fold]
+        use_columns = [
+            col for col in valid_df.columns.tolist() if col not in not_use_cols
+        ]
+        X_valid = valid_df[use_columns]
+        # y_valid = valid_df["score"]
+        if model_type == "lgb":
+            y_pred = eval_lightgbm(X_valid, fold, model_path)
+        elif model_type == "ctb":
+            y_pred = eval_catboost(X_valid, fold, categorical_features, model_path)
+        elif model_type[:4] == "rec_":
+            _model_type = model_type.split("rec_")[1]
+            y_pred = eval_rec(valid_df, fold, _model_type, model_path)
+        else:
+            raise NotImplementedError()
+        train.loc[train["fold"] == fold, "pred"] = y_pred
+    return train["pred"].values
+
+
 def train_folds(
     train: pd.DataFrame,
     n_fold: int,
