@@ -30,7 +30,7 @@ def train_catboost(
         "num_boost_round": 100,
         "early_stopping_rounds": 1000,
         "learning_rate": 0.1,
-        "verbose": 1_000,
+        "verbose": 100,
         "random_seed": seed,
         "task_type": "GPU",
         # "used_ram_limit": "32gb",
