@@ -27,7 +27,7 @@ def train_catboost(
         "objective": "CrossEntropy",  # "MultiClass",
         "loss_function": "CrossEntropy",  # "CrossEntropy",
         "eval_metric": "AUC",
-        "num_boost_round": 100,
+        "num_boost_round": 200,
         "early_stopping_rounds": 1000,
         "learning_rate": 0.1,
         "verbose": 100,

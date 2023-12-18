@@ -22,9 +22,6 @@ validate_functions: dict[str, _BaseKFold] = {
 
 def get_fold_maker(validate_type: str, n_splits: int, **kwargs) -> _BaseKFold:
     fold_maker = validate_functions[validate_type]
-    # KFold(n_splits, shuffle, random_state)
-    # GroupKFold(n_splits)
-    # StratifiedKFold(n_splits, shuffle, random_state)
     return fold_maker(n_splits=n_splits, **kwargs)
 
 
